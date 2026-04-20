@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Databases That Don't Break Under Pressure</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@300;400;500;600;700;900&family=Barlow+Condensed:wght@400;600;700;900&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#03050d;display:flex;align-items:center;justify-content:center;overflow:hidden}
+#wrap{position:relative;width:100%;max-width:960px;aspect-ratio:16/9;background:#03050d;overflow:hidden}
+canvas{display:block;width:100%;height:100%}
+#overlay{position:absolute;inset:0;pointer-events:none;display:flex;flex-direction:column;align-items:center;justify-content:flex-start}
+#phase-label{position:absolute;top:18px;left:24px;font-family:'Barlow Condensed',sans-serif;font-size:10px;font-weight:600;letter-spacing:0.2em;color:#e8960050;text-transform:uppercase;transition:opacity 0.6s}
+#timer{position:absolute;top:18px;right:24px;font-family:'Barlow Condensed',sans-serif;font-size:10px;font-weight:400;letter-spacing:0.12em;color:#e8960040}
+#headline-wrap{position:absolute;width:100%;display:flex;flex-direction:column;align-items:center;gap:0;transition:opacity 0.8s}
+#h1{font-family:'Barlow Condensed',sans-serif;font-weight:900;font-size:clamp(18px,3.4vw,36px);letter-spacing:0.04em;text-transform:uppercase;text-align:center;line-height:1.1;padding:0 24px;opacity:0;transform:translateY(10px);transition:opacity 0.7s,transform 0.7s}
+#h2{font-family:'Barlow',sans-serif;font-weight:300;font-size:clamp(9px,1.25vw,13px);letter-spacing:0.18em;text-transform:uppercase;text-align:center;color:#e8960080;margin-top:10px;opacity:0;transform:translateY(6px);transition:opacity 0.7s 0.15s,transform 0.7s 0.15s}
+#divider{width:0;height:1px;background:linear-gradient(90deg,transparent,#e89600,transparent);margin:12px auto 0;opacity:0;transition:width 0.8s 0.2s,opacity 0.4s 0.2s}
+.txt-in #h1,.txt-in #h2{opacity:1;transform:translateY(0)}
+.txt-in #divider{width:160px;opacity:0.5}
+#badge{position:absolute;font-family:'Barlow Condensed',sans-serif;font-size:clamp(7px,0.95vw,10px);font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:#00c8a0;border:1px solid #00c8a030;padding:5px 14px;border-radius:3px;opacity:0;transition:opacity 0.6s}
+#progress-bar{position:absolute;bottom:0;left:0;right:0;height:2px;background:rgba(232,150,0,0.07)}
+#progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#e8960000,#e89600cc,#ff7b0099);transition:none}
+#restart{position:absolute;bottom:14px;right:16px;font-family:'Barlow',sans-serif;font-size:9px;letter-spacing:0.15em;color:#e8960040;text-transform:uppercase;cursor:pointer;padding:4px 8px;border:1px solid #e8960020;border-radius:2px;background:transparent;transition:color 0.3s,border-color 0.3s;pointer-events:all}
+#restart:hover{color:#e89600;border-color:#e8960060}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv"></canvas>
+  <div id="overlay">
+    <div id="phase-label"></div>
+    <div id="timer"></div>
+    <div id="headline-wrap" style="top:14%">
+      <div id="h1"></div>
+      <div id="divider"></div>
+      <div id="h2"></div>
+    </div>
+    <div id="badge"></div>
+    <div id="progress-bar"><div id="progress-fill"></div></div>
+    <button id="restart">↺ Replay</button>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('cv');
+const cx = cv.getContext('2d');
+const wrap = document.getElementById('wrap');
+
+function resize(){
+  const r = wrap.getBoundingClientRect();
+  cv.width = Math.round(r.width);
+  cv.height = Math.round(r.height);
+}
+resize();
+window.addEventListener('resize', resize);
+
+const W = ()=>cv.width, H = ()=>cv.height;
+const TOTAL = 60000;
+
+const CLR = {
+  bg:'#03050d', gold:'#e89600', saffron:'#ff7b00', white:'#f4ead8',
+  dim:'#7a5828', teal:'#00c8a0', blue:'#3d8bff', red:'#ff3838',
+  goldA: a=>`rgba(232,150,0,${a})`,
+  saffA: a=>`rgba(255,123,0,${a})`,
+  tealA: a=>`rgba(0,200,160,${a})`,
+  blueA: a=>`rgba(61,139,255,${a})`,
+  redA:  a=>`rgba(255,56,56,${a})`
+};
+
+const E = {
+  io: t=>t<0.5?4*t*t*t:(t-1)*(2*t-2)*(2*t-2)+1,
+  out: t=>1-Math.pow(1-t,3),
+  in:  t=>t*t*t,
+  spring: t=>{
+    const c4=(2*Math.PI)/3;
+    return t===0?0:t===1?1:Math.pow(2,-10*t)*Math.sin((t*10-0.75)*c4)+1;
+  }
+};
+
+function lerp(a,b,t){return a+(b-a)*t}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+function fadeW(t,i1,o1,i2,o2){
+  if(t<=i1||t>=o2)return 0;
+  if(t<o1)return E.out((t-i1)/(o1-i1));
+  if(t>i2)return E.out(1-(t-i2)/(o2-i2));
+  return 1;
+}
+
+// ─── HEX GRID ───────────────────────────────────────────────
+const hexGrid = [];
+function buildHex(){
+  hexGrid.length = 0;
+  const s = 30;
+  const cols = Math.ceil(W()/(s*1.732))+2, rows = Math.ceil(H()/(s*1.5))+2;
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    hexGrid.push({
+      x:(c+(r%2)*0.5)*s*1.732-s, y:r*s*1.5-s,
+      phase:Math.random()*Math.PI*2, freq:0.4+Math.random()*0.8,
+      base:0.02+Math.random()*0.04
+    });
+  }
+}
+buildHex();
+window.addEventListener('resize', buildHex);
+
+function drawHexGrid(t, intensity, colorShift=0){
+  cx.save();
+  const s=30;
+  hexGrid.forEach(h=>{
+    const pulse = h.base+0.06*Math.sin(h.phase+t*0.001*h.freq)*intensity;
+    cx.globalAlpha = Math.max(0,pulse);
+    cx.strokeStyle = colorShift>0 ? CLR.red : CLR.gold;
+    cx.lineWidth = 0.6;
+    cx.beginPath();
+    for(let i=0;i<6;i++){
+      const a=Math.PI/6+i*Math.PI/3;
+      i===0
+        ?cx.moveTo(h.x+s*Math.cos(a),h.y+s*Math.sin(a))
+        :cx.lineTo(h.x+s*Math.cos(a),h.y+s*Math.sin(a));
+    }
+    cx.closePath(); cx.stroke();
+  });
+  cx.restore();
+}
+
+// ─── PARTICLES ──────────────────────────────────────────────
+const PARTICLES = Array.from({length:160},()=>({
+  x:Math.random()*1200, y:Math.random()*700,
+  vx:(Math.random()-0.5)*2.5, vy:(Math.random()-0.5)*1.2,
+  r:Math.random()*2.2+0.3, a:Math.random()*0.6+0.15,
+  c:Math.random()>0.5?CLR.gold:CLR.saffron,
+  trail:[], maxTrail:10
+}));
+
+function drawParticles(speedMul=1, alphaMul=1){
+  const hw=W(), hh=H();
+  PARTICLES.forEach(p=>{
+    p.x+=p.vx*speedMul; p.y+=p.vy*speedMul;
+    if(p.x<0)p.x=hw; if(p.x>hw)p.x=0;
+    if(p.y<0)p.y=hh; if(p.y>hh)p.y=0;
+    p.trail.push({x:p.x,y:p.y});
+    if(p.trail.length>p.maxTrail)p.trail.shift();
+    if(p.trail.length>1){
+      cx.save();
+      for(let i=1;i<p.trail.length;i++){
+        const f=i/p.trail.length;
+        cx.globalAlpha=p.a*f*f*0.35*alphaMul;
+        cx.strokeStyle=p.c; cx.lineWidth=p.r*0.8;
+        cx.beginPath();
+        cx.moveTo(p.trail[i-1].x,p.trail[i-1].y);
+        cx.lineTo(p.trail[i].x,p.trail[i].y);
+        cx.stroke();
+      }
+      cx.restore();
+    }
+    cx.save();
+    cx.globalAlpha=p.a*alphaMul;
+    cx.fillStyle=p.c;
+    cx.beginPath(); cx.arc(p.x,p.y,p.r,0,Math.PI*2); cx.fill();
+    cx.restore();
+  });
+}
+
+// ─── NEURAL NODES ───────────────────────────────────────────
+const NEURAL = Array.from({length:28},()=>({
+  x:Math.random()*1200, y:Math.random()*600,
+  vx:(Math.random()-0.5)*0.6, vy:(Math.random()-0.5)*0.4,
+  r:1.5+Math.random()*3,
+  c:[CLR.gold,CLR.saffron,CLR.teal,CLR.blue,CLR.gold,CLR.gold][Math.floor(Math.random()*6)]
+}));
+
+function drawNeural(alpha){
+  const hw=W(), hh=H();
+  NEURAL.forEach(n=>{
+    n.x+=n.vx; n.y+=n.vy;
+    if(n.x<20||n.x>hw-20)n.vx*=-1;
+    if(n.y<20||n.y>hh*0.75)n.vy*=-1;
+  });
+  cx.save();
+  for(let i=0;i<NEURAL.length;i++) for(let j=i+1;j<NEURAL.length;j++){
+    const dx=NEURAL[i].x-NEURAL[j].x, dy=NEURAL[i].y-NEURAL[j].y;
+    const d=Math.sqrt(dx*dx+dy*dy);
+    if(d<150){
+      cx.globalAlpha=alpha*(1-d/150)*0.3;
+      cx.strokeStyle=CLR.gold; cx.lineWidth=0.5;
+      cx.beginPath();
+      cx.moveTo(NEURAL[i].x,NEURAL[i].y);
+      cx.lineTo(NEURAL[j].x,NEURAL[j].y);
+      cx.stroke();
+    }
+  }
+  NEURAL.forEach(n=>{
+    cx.globalAlpha=alpha*0.85; cx.fillStyle=n.c;
+    cx.beginPath(); cx.arc(n.x,n.y,n.r,0,Math.PI*2); cx.fill();
+    cx.globalAlpha=alpha*0.15;
+    cx.beginPath(); cx.arc(n.x,n.y,n.r*3,0,Math.PI*2); cx.fill();
+  });
+  cx.restore();
+}
+
+// ─── DATA STREAMS ───────────────────────────────────────────
+const STREAMS = Array.from({length:20},(_,i)=>({
+  y:0.1+i*0.045, speed:0.4+Math.random()*0.8,
+  offset:Math.random(), len:0.06+Math.random()*0.12,
+  col:i%3===0?CLR.teal:i%3===1?CLR.gold:CLR.saffron
+}));
+
+function drawStreams(t, alpha){
+  const hw=W(), hh=H();
+  cx.save();
+  STREAMS.forEach(s=>{
+    const x=((s.offset+t*s.speed*0.00008)%1)*hw;
+    const len=s.len*hw;
+    const grd=cx.createLinearGradient(x-len,0,x,0);
+    grd.addColorStop(0,'transparent');
+    grd.addColorStop(1,s.col);
+    cx.globalAlpha=alpha*0.6;
+    cx.fillStyle=grd;
+    cx.fillRect(x-len, s.y*hh, len, 1.5);
+  });
+  cx.restore();
+}
+
+// ─── CYLINDER DB NODE ───────────────────────────────────────
+function drawCylinder(x, y, rx, ry, h, alpha, glow, flicker, col=CLR.gold){
+  cx.save();
+  let a = flicker ? alpha*(0.5+Math.random()*0.5) : alpha;
+  if(glow>0){
+    const g=cx.createRadialGradient(x,y,ry,x,y,Math.max(ry*5+glow*60,ry*5+1));
+    g.addColorStop(0,CLR.goldA(glow*0.55));
+    g.addColorStop(0.4,CLR.saffA(glow*0.15));
+    g.addColorStop(1,'transparent');
+    cx.globalAlpha=a; cx.fillStyle=g;
+    cx.beginPath();
+    cx.ellipse(x,y,ry*5+glow*60,ry*5+glow*60,0,0,Math.PI*2);
+    cx.fill();
+  }
+  cx.globalAlpha=a;
+  cx.fillStyle='rgba(12,16,28,0.9)';
+  cx.strokeStyle=col; cx.lineWidth=1.5;
+  cx.beginPath();
+  cx.moveTo(x-rx, y-h/2);
+  cx.lineTo(x-rx, y+h/2);
+  cx.ellipse(x, y+h/2, rx, ry, 0, Math.PI, 0);
+  cx.lineTo(x+rx, y-h/2);
+  cx.closePath(); cx.fill(); cx.stroke();
+  cx.beginPath(); cx.ellipse(x, y-h/2, rx, ry, 0, 0, Math.PI*2);
+  cx.fillStyle=CLR.goldA(0.18); cx.fill();
+  cx.strokeStyle=col; cx.lineWidth=1.5; cx.stroke();
+  [0.1,0.4,0.7].forEach(f=>{
+    cx.beginPath();
+    cx.ellipse(x, y-h/2+h*f+ry*0.5, rx*0.7, ry*0.5, 0, 0, Math.PI*2);
+    cx.strokeStyle=CLR.goldA(0.25); cx.lineWidth=0.8; cx.stroke();
+  });
+  cx.restore();
+}
+
+// ─── PIPELINE ───────────────────────────────────────────────
+const PIPE_NODES = [
+  {id:'APP',  sub:'Client',   x:0.09, isDB:false, col:CLR.teal},
+  {id:'QUERY',sub:'Optimizer',x:0.24, isDB:false, col:CLR.gold},
+  {id:'DB',   sub:'Core',     x:0.50, isDB:true,  col:CLR.gold},
+  {id:'CACHE',sub:'Hot Layer',x:0.76, isDB:false, col:CLR.saffron},
+  {id:'RESP', sub:'Response', x:0.91, isDB:false, col:CLR.teal}
+];
+
+const FLOW_DOTS = [];
+for(let seg=0;seg<PIPE_NODES.length-1;seg++)
+  for(let j=0;j<6;j++)
+    FLOW_DOTS.push({seg, off:(j/6), sp:0.00055+Math.random()*0.0004});
+
+function drawPipeline(t, alpha){
+  if(alpha<=0)return;
+  const hw=W(), hh=H();
+  const py=hh*0.52;
+  cx.save();
+  // Connections
+  for(let i=0;i<PIPE_NODES.length-1;i++){
+    const a=PIPE_NODES[i], b=PIPE_NODES[i+1];
+    const x1=a.x*hw+(a.isDB?34:22), x2=b.x*hw-(b.isDB?34:22);
+    const segA=E.out(clamp(alpha*PIPE_NODES.length-i*0.6,0,1));
+    cx.globalAlpha=alpha*segA*0.5;
+    cx.strokeStyle=CLR.gold; cx.lineWidth=1;
+    cx.setLineDash([5,6]); cx.lineDashOffset=-t*0.06;
+    cx.beginPath(); cx.moveTo(x1,py); cx.lineTo(x2,py); cx.stroke();
+    cx.setLineDash([]);
+  }
+  // Flow dots
+  FLOW_DOTS.forEach(d=>{
+    d.off=(d.off+d.sp)%1;
+    const a=PIPE_NODES[d.seg], b=PIPE_NODES[d.seg+1];
+    const x1=a.x*hw+(a.isDB?34:22), x2=b.x*hw-(b.isDB?34:22);
+    const fx=x1+(x2-x1)*d.off;
+    cx.globalAlpha=alpha*0.95;
+    cx.fillStyle=CLR.saffron;
+    cx.beginPath(); cx.arc(fx,py,2.5,0,Math.PI*2); cx.fill();
+    cx.globalAlpha=alpha*0.25;
+    cx.beginPath(); cx.arc(fx,py,5,0,Math.PI*2); cx.fill();
+  });
+  // Nodes
+  PIPE_NODES.forEach((n,i)=>{
+    const na=E.spring(clamp(alpha*6-i*0.7,0,1));
+    if(na<=0)return;
+    const nx=n.x*hw;
+    const r=n.isDB?34:22;
+    if(n.isDB){
+      const dbGlow=(0.5+0.3*Math.sin(t*0.004))*alpha;
+      drawCylinder(nx, py-4, r, r*0.35, r*1.3, na*alpha, dbGlow, false, n.col);
+    } else {
+      const pulse=n.id==='CACHE'?0.3+0.25*Math.sin(t*0.007+1.5):0;
+      if(pulse>0){
+        const pg=cx.createRadialGradient(nx,py,r,nx,py,r*3);
+        pg.addColorStop(0,CLR.saffA(pulse*alpha));
+        pg.addColorStop(1,'transparent');
+        cx.globalAlpha=1; cx.fillStyle=pg;
+        cx.beginPath(); cx.arc(nx,py,r*3,0,Math.PI*2); cx.fill();
+      }
+      if(n.id==='CACHE'){
+        cx.globalAlpha=na*alpha*0.35;
+        cx.strokeStyle=CLR.saffron; cx.lineWidth=0.7;
+        cx.beginPath(); cx.arc(nx,py,r+6+3*Math.sin(t*0.006),0,Math.PI*2); cx.stroke();
+      }
+      cx.globalAlpha=na*alpha;
+      cx.beginPath(); cx.arc(nx,py,r,0,Math.PI*2);
+      cx.fillStyle='rgba(6,10,20,0.85)'; cx.fill();
+      cx.strokeStyle=n.col; cx.lineWidth=1.5; cx.stroke();
+      cx.fillStyle=n.col;
+      cx.font=`700 ${r>20?11:10}px 'Barlow Condensed',sans-serif`;
+      cx.textAlign='center'; cx.textBaseline='middle';
+      cx.fillText(n.id, nx, py-1);
+    }
+    cx.globalAlpha=na*alpha*0.55;
+    cx.fillStyle=CLR.dim;
+    cx.font=`400 9px 'Barlow',sans-serif`;
+    cx.textAlign='center'; cx.textBaseline='top';
+    cx.fillText(n.sub, nx, py+r+(n.isDB?14:10));
+  });
+  cx.restore();
+}
+
+// ─── ORBITS ─────────────────────────────────────────────────
+function drawOrbits(t, alpha){
+  if(alpha<=0)return;
+  const hw=W(), hh=H();
+  const cx2=hw*0.5, cy2=hh*0.52-4;
+  cx.save();
+  [[55,0.0025,CLR.teal,0],[75,0.0018,CLR.gold,1],[98,0.0012,CLR.saffron,2]].forEach(([r,sp,col,i])=>{
+    const a=t*sp+i*(Math.PI*2/3);
+    cx.globalAlpha=alpha*(0.12-i*0.025);
+    cx.strokeStyle=col; cx.lineWidth=0.7;
+    cx.beginPath(); cx.arc(cx2,cy2,r,0,Math.PI*2); cx.stroke();
+    cx.globalAlpha=alpha*0.8;
+    cx.fillStyle=col;
+    cx.beginPath(); cx.arc(cx2+r*Math.cos(a),cy2+r*Math.sin(a),3.5,0,Math.PI*2); cx.fill();
+    cx.globalAlpha=alpha*0.2;
+    cx.beginPath(); cx.arc(cx2+r*Math.cos(a),cy2+r*Math.sin(a),8,0,Math.PI*2); cx.fill();
+  });
+  cx.restore();
+}
+
+// ─── STATS CARDS ────────────────────────────────────────────
+function drawStats(t, alpha){
+  if(alpha<=0)return;
+  const hw=W(), hh=H();
+  const cards=[
+    {val:'↓ 80%', lbl:'LATENCY',    col:CLR.teal},
+    {val:'99.99%',lbl:'UPTIME',      col:CLR.gold},
+    {val:'↑ 10×', lbl:'THROUGHPUT', col:CLR.saffron},
+    {val:'< 1ms', lbl:'QUERY TIME',  col:CLR.blue}
+  ];
+  const cw=hw*0.14, ch=hh*0.13, gap=hw*0.02;
+  const total=cards.length*(cw+gap)-gap;
+  const sx=(hw-total)/2, sy=hh*0.72;
+  cx.save();
+  cards.forEach((c,i)=>{
+    const ca=E.spring(clamp(alpha*5-i*0.7,0,1));
+    if(ca<=0)return;
+    const bx=sx+i*(cw+gap);
+    cx.globalAlpha=ca*alpha*0.9;
+    cx.fillStyle='rgba(6,10,22,0.88)';
+    cx.strokeStyle=c.col+'55'; cx.lineWidth=0.8;
+    cx.beginPath(); cx.roundRect(bx,sy,cw,ch,5); cx.fill(); cx.stroke();
+    cx.globalAlpha=ca*alpha;
+    const acg=cx.createLinearGradient(bx,sy,bx+cw,sy);
+    acg.addColorStop(0,'transparent');
+    acg.addColorStop(0.5,c.col);
+    acg.addColorStop(1,'transparent');
+    cx.strokeStyle=acg; cx.lineWidth=1;
+    cx.beginPath(); cx.moveTo(bx+8,sy); cx.lineTo(bx+cw-8,sy); cx.stroke();
+    cx.fillStyle=c.col;
+    cx.font=`700 ${Math.floor(cw*0.22)}px 'Barlow Condensed',sans-serif`;
+    cx.textAlign='center'; cx.textBaseline='middle';
+    cx.globalAlpha=ca*alpha;
+    cx.fillText(c.val, bx+cw/2, sy+ch*0.45);
+    cx.fillStyle=CLR.dim;
+    cx.font=`600 ${Math.floor(cw*0.092)}px 'Barlow Condensed',sans-serif`;
+    cx.fillText(c.lbl, bx+cw/2, sy+ch*0.78);
+  });
+  cx.restore();
+}
+
+// ─── SCANLINE ───────────────────────────────────────────────
+function drawScan(t){
+  const hw=W(), hh=H();
+  const y=(t*0.045)%hh;
+  cx.save(); cx.globalAlpha=0.03;
+  cx.strokeStyle=CLR.gold; cx.lineWidth=2;
+  cx.beginPath(); cx.moveTo(0,y); cx.lineTo(hw,y); cx.stroke();
+  cx.restore();
+}
+
+// ─── RADAR SWEEP ────────────────────────────────────────────
+function drawRadar(t, alpha){
+  if(alpha<=0)return;
+  const hw=W(), hh=H();
+  const cx2=hw*0.5, cy2=hh*0.52, r=130;
+  const angle=t*0.002;
+  cx.save();
+  cx.globalAlpha=alpha*0.18;
+  cx.strokeStyle=CLR.teal; cx.lineWidth=1;
+  cx.beginPath(); cx.arc(cx2,cy2,r,0,Math.PI*2); cx.stroke();
+  cx.globalAlpha=alpha*0.12;
+  cx.fillStyle=CLR.teal;
+  cx.beginPath(); cx.moveTo(cx2,cy2);
+  cx.arc(cx2,cy2,r,angle-0.6,angle); cx.closePath(); cx.fill();
+  cx.globalAlpha=alpha*0.5;
+  cx.strokeStyle=CLR.teal; cx.lineWidth=1;
+  cx.beginPath(); cx.moveTo(cx2,cy2);
+  cx.lineTo(cx2+r*Math.cos(angle),cy2+r*Math.sin(angle)); cx.stroke();
+  cx.restore();
+}
+
+// ─── GLITCH ─────────────────────────────────────────────────
+function drawGlitch(alpha){
+  if(alpha<=0||Math.random()>0.4)return;
+  const hw=W(), hh=H();
+  cx.save();
+  for(let i=0;i<5;i++){
+    const y=Math.random()*hh, w=20+Math.random()*200, x=Math.random()*(hw-w);
+    cx.globalAlpha=alpha*(0.3+Math.random()*0.4);
+    cx.fillStyle=Math.random()>0.5?CLR.red:CLR.saffron;
+    cx.fillRect(x,y,w,Math.random()*2+0.5);
+  }
+  cx.restore();
+}
+
+// ─── VIGNETTE ───────────────────────────────────────────────
+function drawVignette(strength){
+  const hw=W(), hh=H();
+  const g=cx.createRadialGradient(hw/2,hh/2,hh*0.25,hw/2,hh/2,hh*0.9);
+  g.addColorStop(0,'transparent');
+  g.addColorStop(1,`rgba(3,5,13,${strength})`);
+  cx.save(); cx.fillStyle=g; cx.globalAlpha=1; cx.fillRect(0,0,hw,hh); cx.restore();
+}
+
+// ─── BROKEN DB (phase 0) ────────────────────────────────────
+function drawBrokenDB(t, alpha){
+  const hw=W(), hh=H();
+  const flicker=alpha*(0.4+0.4*Math.sin(t*0.08)+0.2*Math.random());
+  cx.save();
+  const rg=cx.createRadialGradient(hw/2,hh*0.48,5,hw/2,hh*0.48,120);
+  rg.addColorStop(0,CLR.redA(0.5*flicker));
+  rg.addColorStop(0.5,CLR.redA(0.1*flicker));
+  rg.addColorStop(1,'transparent');
+  cx.globalAlpha=1; cx.fillStyle=rg; cx.fillRect(0,0,hw,hh);
+  const bx=hw/2, by=hh*0.48, rx=28, ry=10, ch=38;
+  [[-3,2],[-1,-3],[2,1],[0,4]].forEach(([ox,oy],i)=>{
+    cx.globalAlpha=flicker*(0.6+Math.sin(t*0.05+i)*0.4);
+    cx.beginPath();
+    cx.moveTo(bx-rx+ox, by-ch/2+oy);
+    cx.lineTo(bx-rx+ox, by+ch/2+oy);
+    cx.ellipse(bx+ox, by+ch/2+oy, rx, ry, 0, Math.PI, 0);
+    cx.lineTo(bx+rx+ox, by-ch/2+oy);
+    cx.closePath();
+    cx.strokeStyle=CLR.red; cx.lineWidth=1.5; cx.stroke();
+    cx.fillStyle='rgba(255,30,30,0.05)'; cx.fill();
+  });
+  cx.globalAlpha=flicker*0.6;
+  cx.strokeStyle=CLR.red; cx.lineWidth=1; cx.setLineDash([4,4]);
+  cx.beginPath(); cx.arc(hw/2, hh*0.48, 55, 0, Math.PI*2); cx.stroke();
+  cx.setLineDash([]);
+  cx.restore();
+}
+
+// ─── OVERLOADED DB (phase 1) ─────────────────────────────────
+function drawOverloadedDB(t, alpha){
+  const hw=W(), hh=H();
+  const heat=0.7+0.3*Math.sin(t*0.009);
+  cx.save();
+  // Heatmap glow
+  const hg=cx.createRadialGradient(hw/2,hh*0.48,10,hw/2,hh*0.48,180);
+  hg.addColorStop(0,CLR.redA(0.65*alpha*heat));
+  hg.addColorStop(0.3,CLR.saffA(0.25*alpha*heat));
+  hg.addColorStop(0.7,CLR.goldA(0.08*alpha));
+  hg.addColorStop(1,'transparent');
+  cx.fillStyle=hg; cx.globalAlpha=1; cx.fillRect(0,0,hw,hh);
+  // Red glow before cylinder
+  const rGlow=cx.createRadialGradient(hw/2,hh*0.48-4,5,hw/2,hh*0.48-4,90);
+  rGlow.addColorStop(0,CLR.redA(0.5*alpha));
+  rGlow.addColorStop(1,'transparent');
+  cx.fillStyle=rGlow; cx.globalAlpha=1; cx.fillRect(0,0,hw,hh);
+  // Overloaded cylinder
+  const flicker=alpha*(0.75+0.25*Math.random());
+  drawCylinder(hw/2, hh*0.48-4, 34, 12, 44, flicker, 0, true, CLR.red);
+  // Query queue stacking
+  const qx=hw*0.27, qy=hh*0.48;
+  const qLen=Math.min(8, Math.floor(alpha*12));
+  cx.globalAlpha=alpha*0.45;
+  cx.fillStyle=CLR.dim+'cc';
+  cx.font=`500 8px 'Barlow Condensed',sans-serif`;
+  cx.textAlign='left'; cx.textBaseline='bottom';
+  cx.fillText('QUERY QUEUE', qx, qy-15);
+  for(let i=0;i<qLen;i++){
+    cx.globalAlpha=alpha*(0.4+0.35*(i/8));
+    cx.fillStyle=i%2===0?CLR.saffron:CLR.gold;
+    cx.fillRect(qx+i*13, qy-9, 11, 18);
+    cx.globalAlpha=alpha*0.3;
+    cx.strokeStyle=CLR.goldA(0.4); cx.lineWidth=0.5;
+    cx.strokeRect(qx+i*13, qy-9, 11, 18);
+  }
+  // Congestion arrow
+  if(qLen>4){
+    cx.globalAlpha=alpha*0.45;
+    cx.strokeStyle=CLR.red; cx.lineWidth=1.2;
+    cx.setLineDash([4,4]);
+    cx.beginPath();
+    cx.moveTo(qx+qLen*13+8, qy);
+    cx.lineTo(hw/2-42, qy);
+    cx.stroke();
+    cx.setLineDash([]);
+  }
+  // Warning rings
+  for(let ri=0;ri<3;ri++){
+    const r=62+ri*28+10*Math.sin(t*0.005+ri);
+    cx.globalAlpha=alpha*(0.45-ri*0.1)*Math.abs(Math.sin(t*0.004+ri));
+    cx.strokeStyle=CLR.red; cx.lineWidth=0.8;
+    cx.setLineDash([3,5]);
+    cx.beginPath(); cx.arc(hw/2,hh*0.48,r,0,Math.PI*2); cx.stroke();
+    cx.setLineDash([]);
+  }
+  cx.restore();
+}
+
+// ─── PROBLEM LABELS (phase 1) ───────────────────────────────
+function drawProblemLabels(elapsed, alpha){
+  if(alpha<=0)return;
+  const hw=W(), hh=H();
+  const p=clamp((elapsed-10000)/10000, 0, 1);
+  const labels=[
+    {txt:'NO INDEXING',  x:0.16, y:0.24, showAt:0.12},
+    {txt:'NO SCALING',   x:0.80, y:0.20, showAt:0.38},
+    {txt:'NO FAILOVER',  x:0.80, y:0.68, showAt:0.62}
+  ];
+  cx.save();
+  cx.font=`700 11px 'Barlow Condensed',sans-serif`;
+  labels.forEach(l=>{
+    const la=E.out(clamp((p-l.showAt)*9,0,1))*alpha;
+    if(la<=0)return;
+    const pulse=0.75+0.25*Math.sin(elapsed*0.005+l.showAt*10);
+    const x=l.x*hw, y=l.y*hh;
+    const tw=cx.measureText(l.txt).width;
+    cx.globalAlpha=la*0.85*pulse;
+    cx.fillStyle='rgba(255,30,30,0.14)';
+    cx.strokeStyle=CLR.redA(0.5); cx.lineWidth=0.8;
+    cx.beginPath(); cx.roundRect(x-tw/2-12,y-11,tw+24,24,3); cx.fill(); cx.stroke();
+    cx.fillStyle=CLR.red; cx.textAlign='center'; cx.textBaseline='middle';
+    cx.globalAlpha=la*pulse;
+    cx.fillText(l.txt,x,y+1);
+  });
+  cx.restore();
+}
+
+// ─── REPLICATION NODES (phase 3+) ───────────────────────────
+function drawReplicationNodes(t, alpha){
+  if(alpha<=0)return;
+  const hw=W(), hh=H();
+  const mainX=hw*0.5, mainY=hh*0.52-4;
+  const repNodes=[
+    {x:mainX-hw*0.20, y:mainY+hh*0.16, d:0.0},
+    {x:mainX+hw*0.20, y:mainY+hh*0.16, d:0.28}
+  ];
+  cx.save();
+  repNodes.forEach((n,i)=>{
+    const na=E.out(clamp(alpha*4-n.d*3.5,0,1));
+    if(na<=0)return;
+    const pulse=0.35+0.25*Math.sin(t*0.005+i*Math.PI);
+    // Sync line
+    cx.globalAlpha=na*alpha*pulse*0.55;
+    cx.strokeStyle=CLR.gold; cx.lineWidth=0.8;
+    cx.setLineDash([4,5]); cx.lineDashOffset=-t*0.04;
+    cx.beginPath(); cx.moveTo(mainX,mainY+26); cx.lineTo(n.x,n.y-17); cx.stroke();
+    cx.setLineDash([]);
+    // Animated sync dot
+    const dp=((t*0.00042+i*0.5)%1);
+    const ddx=n.x-mainX, ddy=n.y-17-(mainY+26);
+    cx.globalAlpha=na*alpha*0.9;
+    cx.fillStyle=CLR.gold;
+    cx.beginPath();
+    cx.arc(mainX+ddx*dp, mainY+26+ddy*dp, 2.2, 0, Math.PI*2);
+    cx.fill();
+    // Replica cylinder
+    drawCylinder(n.x,n.y,20,7,27,na*alpha*0.85,na*alpha*0.22,false,CLR.gold);
+    // Label
+    cx.globalAlpha=na*alpha*0.5;
+    cx.fillStyle=CLR.dim;
+    cx.font=`400 8px 'Barlow',sans-serif`;
+    cx.textAlign='center'; cx.textBaseline='top';
+    cx.fillText('REPLICA', n.x, n.y+19);
+  });
+  cx.restore();
+}
+
+// ─── BACKUP LAYER (phase 3+) ────────────────────────────────
+function drawBackupLayer(t, alpha){
+  if(alpha<=0)return;
+  const hw=W(), hh=H();
+  const bx=hw*0.5, by=hh*0.845;
+  const ba=E.out(clamp(alpha*2.5,0,1));
+  const rw=hw*0.22, rh=15;
+  cx.save();
+  cx.globalAlpha=ba*alpha*0.55;
+  cx.fillStyle='rgba(6,10,22,0.75)';
+  cx.strokeStyle=CLR.saffron+'50'; cx.lineWidth=0.8;
+  cx.beginPath(); cx.roundRect(bx-rw/2,by-rh/2,rw,rh,3); cx.fill(); cx.stroke();
+  for(let i=0;i<5;i++){
+    const sx=bx-rw/2+(i/5)*rw+4;
+    const filled=i<3;
+    cx.globalAlpha=ba*alpha*(filled?0.4+0.3*(i/4):0.15);
+    cx.fillStyle=filled?CLR.saffron:'#334';
+    cx.beginPath(); cx.roundRect(sx,by-rh/2+3,rw/5-8,rh-6,1); cx.fill();
+  }
+  cx.globalAlpha=ba*alpha*0.45;
+  cx.fillStyle=CLR.saffron;
+  cx.font=`600 8px 'Barlow Condensed',sans-serif`;
+  cx.textAlign='center'; cx.textBaseline='bottom';
+  cx.fillText('BACKUP STORAGE', bx, by-rh/2-3);
+  // Dashed line from DB
+  const pulse=0.3+0.2*Math.sin(t*0.004);
+  cx.globalAlpha=ba*alpha*pulse*0.4;
+  cx.strokeStyle=CLR.saffron; cx.lineWidth=0.6;
+  cx.setLineDash([3,6]); cx.lineDashOffset=-t*0.025;
+  cx.beginPath(); cx.moveTo(hw*0.5,hh*0.52+30); cx.lineTo(hw*0.5,by-rh/2); cx.stroke();
+  cx.setLineDash([]);
+  cx.restore();
+}
+
+// ─── SOLUTION LABELS (phase 4+) ─────────────────────────────
+function drawSolutionLabels(elapsed, alpha){
+  if(alpha<=0)return;
+  const hw=W(), hh=H();
+  const p=clamp((elapsed-45000)/10000, 0, 1);
+  const labels=[
+    {txt:'INDEXING',    x:0.15, y:0.24, col:CLR.teal,    showAt:0.08},
+    {txt:'REPLICATION', x:0.82, y:0.20, col:CLR.gold,    showAt:0.35},
+    {txt:'BACKUPS',     x:0.18, y:0.88, col:CLR.saffron, showAt:0.60}
+  ];
+  cx.save();
+  cx.font=`700 12px 'Barlow Condensed',sans-serif`;
+  labels.forEach(l=>{
+    const la=E.out(clamp((p-l.showAt)*9,0,1))*alpha;
+    if(la<=0)return;
+    const pulse=0.82+0.18*Math.sin(elapsed*0.004+l.showAt*5);
+    const x=l.x*hw, y=l.y*hh;
+    const tw=cx.measureText(l.txt).width;
+    cx.globalAlpha=la*0.88*pulse;
+    cx.fillStyle=l.col+'12';
+    cx.strokeStyle=l.col+'44'; cx.lineWidth=0.8;
+    cx.beginPath(); cx.roundRect(x-tw/2-14,y-12,tw+28,26,4); cx.fill(); cx.stroke();
+    cx.fillStyle=l.col; cx.textAlign='center'; cx.textBaseline='middle';
+    cx.globalAlpha=la*pulse;
+    cx.fillText(l.txt,x,y+1);
+  });
+  cx.restore();
+}
+
+// ─── HEADLINE CONTROLLER ────────────────────────────────────
+const HW_EL = document.getElementById('headline-wrap');
+const H1 = document.getElementById('h1');
+const H2 = document.getElementById('h2');
+const BADGE = document.getElementById('badge');
+const PHASE_LBL = document.getElementById('phase-label');
+const TIMER_EL = document.getElementById('timer');
+
+let currentPhase = -1;
+const PHASES_META = [
+  {label:'System Under Pressure'},
+  {label:'Why Systems Fail'},
+  {label:'Transformation Begins'},
+  {label:'Architecture Online'},
+  {label:'System Stable Under Load'},
+  {label:'Enterprise Grade'}
+];
+
+function setHeadline(h1txt, h2txt, col, top, badgeTxt='', badgeTop=''){
+  H1.textContent = h1txt;
+  H1.style.color  = col || CLR.white;
+  H2.textContent  = h2txt;
+  HW_EL.style.top = top || '14%';
+  HW_EL.classList.remove('txt-in');
+  void HW_EL.offsetWidth;
+  HW_EL.classList.add('txt-in');
+  if(badgeTxt){
+    BADGE.textContent = badgeTxt;
+    BADGE.style.top   = badgeTop || '36%';
+    BADGE.style.opacity = '0';
+    setTimeout(()=>BADGE.style.opacity='1', 500);
+  } else {
+    BADGE.style.opacity = '0';
+  }
+}
+
+const PHASE_HEADLINES = [
+  // Phase 0 — CHAOS
+  ()=>setHeadline(
+    "Databases That Don't Break Under Pressure",
+    "Your system is only as strong as your database.",
+    CLR.red, '13%', '⚠  SYSTEM UNDER PRESSURE', '34%'
+  ),
+  // Phase 1 — PROBLEM EXPANSION
+  ()=>setHeadline(
+    'Why Systems Fail',
+    'No indexing. No scaling. No failover.',
+    CLR.red, '13%', '⚠  CRITICAL FAILURE POINTS', '34%'
+  ),
+  // Phase 2 — TRANSFORMATION
+  ()=>setHeadline(
+    'Performance + Security + Availability',
+    'Modern architecture engineered for scale.',
+    CLR.gold, '10%', 'OPTIMIZATION IN PROGRESS', '34%'
+  ),
+  // Phase 3 — SYSTEM FORMATION
+  ()=>setHeadline(
+    'The Architecture of Zero Downtime',
+    'App  →  Query  →  DB  →  Cache  →  Response',
+    CLR.white, '10%', 'LATENCY ↓ 80%', '34%'
+  ),
+  // Phase 4 — STABILITY & SCALE
+  ()=>setHeadline(
+    'Zero Bottlenecks. Zero Compromise.',
+    'Indexing · Replication · Backups',
+    CLR.saffron, '10%', 'PERFORMANCE MODE · ALWAYS ON', '34%'
+  ),
+  // Phase 5 — FINAL IMPACT
+  ()=>setHeadline(
+    'Fast. Secure. Reliable. Always.',
+    'Data must be fast, secure, and reliable.',
+    CLR.gold, '12%', 'ENTERPRISE-GRADE · ALWAYS ON', '34%'
+  )
+];
+
+// ─── MAIN RENDER ────────────────────────────────────────────
+let t0 = null;
+
+function render(ts){
+  if(!t0) t0 = ts;
+  const elapsed = (ts - t0) % TOTAL;
+  const hw = W(), hh = H();
+
+  document.getElementById('progress-fill').style.width = (elapsed/TOTAL*100)+'%';
+  TIMER_EL.textContent = Math.floor(elapsed/1000) + 's / 60s';
+
+  const phase =
+    elapsed < 10000 ? 0 :
+    elapsed < 20000 ? 1 :
+    elapsed < 30000 ? 2 :
+    elapsed < 45000 ? 3 :
+    elapsed < 55000 ? 4 : 5;
+
+  if(phase !== currentPhase){
+    currentPhase = phase;
+    PHASE_LBL.textContent = PHASES_META[phase].label;
+    PHASE_HEADLINES[phase]();
+  }
+
+  cx.clearRect(0,0,hw,hh);
+  cx.fillStyle = CLR.bg; cx.fillRect(0,0,hw,hh);
+
+  // ─────────────────────────────────────────────────────────
+  // PHASE 0 — CHAOS  [0s – 10s]
+  // Broken DB, fragmented data, red tension, glitch
+  // ─────────────────────────────────────────────────────────
+  if(phase === 0){
+    drawHexGrid(elapsed, 1.2, 0.5);
+    drawNeural(0.35);
+    drawParticles(0.4, 0.25);
+    drawStreams(elapsed, 0.2);
+    drawBrokenDB(elapsed, 1);
+    drawGlitch(0.6);
+    drawScan(elapsed);
+    drawVignette(0.82);
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // PHASE 1 — PROBLEM EXPANSION  [10s – 20s]
+  // Overloaded DB, query congestion, problem labels
+  // ─────────────────────────────────────────────────────────
+  else if(phase === 1){
+    const p = (elapsed-10000)/10000;
+    // Subtle tension wobble fading mid-phase
+    const sx = Math.sin(elapsed*0.031)*2.2*(1-clamp(p*1.8,0,1));
+    const sy = Math.cos(elapsed*0.047)*1.5*(1-clamp(p*1.8,0,1));
+    cx.save();
+    cx.translate(sx, sy);
+    drawHexGrid(elapsed, 1.0, 0.45);
+    drawNeural(0.28);
+    drawParticles(0.5, 0.28);
+    drawStreams(elapsed, 0.16);
+    drawOverloadedDB(elapsed, 1);
+    drawProblemLabels(elapsed, E.out(clamp(p*1.8,0,1)));
+    if(Math.random() > 0.92) drawGlitch(0.22);
+    drawScan(elapsed);
+    drawVignette(0.72);
+    cx.restore();
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // PHASE 2 — TRANSFORMATION  [20s – 30s]
+  // System reorganizes, nodes align, cache appears, gold shift
+  // ─────────────────────────────────────────────────────────
+  else if(phase === 2){
+    const p = (elapsed-20000)/10000;
+    drawHexGrid(elapsed, lerp(1.0,0.4,p));
+    drawNeural(lerp(0.28,0.65,p));
+    drawParticles(lerp(0.5,1.5,p), lerp(0.28,0.6,p));
+    drawStreams(elapsed, lerp(0.16,0.45,p));
+    const formA = E.out(clamp(p*2,0,1));
+    if(formA > 0.02){
+      const rg=cx.createRadialGradient(hw/2,hh*0.52,5,hw/2,hh*0.52,Math.max(140*formA,1));
+      rg.addColorStop(0,CLR.goldA(0.5*formA));
+      rg.addColorStop(0.5,CLR.saffA(0.1*formA));
+      rg.addColorStop(1,'transparent');
+      cx.save(); cx.fillStyle=rg; cx.globalAlpha=1; cx.fillRect(0,0,hw,hh); cx.restore();
+    }
+    if(formA>0.08)
+      drawCylinder(hw/2, hh*0.52-4,
+        lerp(8,34,formA), lerp(3,12,formA), lerp(14,44,formA),
+        formA, formA*0.5, false);
+    if(p>0.35) drawOrbits(elapsed, E.out(clamp((p-0.35)*2.5,0,1))*0.65);
+    drawRadar(elapsed, lerp(0,0.9,formA));
+    drawScan(elapsed);
+    drawVignette(lerp(0.72,0.42,p));
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // PHASE 3 — SYSTEM FORMATION  [30s – 45s]
+  // Full pipeline, replication nodes, backup layer, stats
+  // ─────────────────────────────────────────────────────────
+  else if(phase === 3){
+    const p = (elapsed-30000)/15000;
+    drawHexGrid(elapsed, 0.35);
+    drawParticles(1.8, 0.5);
+    drawStreams(elapsed, 0.42);
+    const pipeA = E.out(clamp(p*3,0,1));
+    drawOrbits(elapsed, pipeA*0.65);
+    drawPipeline(elapsed, pipeA);
+    // Cache burst highlight
+    const ca = 0.35+0.25*Math.sin(elapsed*0.008);
+    const cg = cx.createRadialGradient(hw*0.76,hh*0.52,10,hw*0.76,hh*0.52,82);
+    cg.addColorStop(0,CLR.saffA(ca*0.65*pipeA));
+    cg.addColorStop(1,'transparent');
+    cx.save(); cx.fillStyle=cg; cx.globalAlpha=1;
+    cx.beginPath(); cx.arc(hw*0.76,hh*0.52,82,0,Math.PI*2); cx.fill();
+    cx.restore();
+    // Replication nodes appear at 37.75s (p≈0.517)
+    if(p>0.25) drawReplicationNodes(elapsed, E.out(clamp((p-0.25)*4,0,1)));
+    // Backup layer appears at 37.5s (p≈0.5)
+    if(p>0.48) drawBackupLayer(elapsed, E.out(clamp((p-0.48)*5,0,1)));
+    // Stats cards appear at 33.5s
+    const statsA = fadeW(elapsed, 33500, 35000, 44200, 45000);
+    if(statsA>0) drawStats(elapsed, statsA);
+    drawScan(elapsed);
+    drawVignette(0.4);
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // PHASE 4 — STABILITY & SCALE  [45s – 55s]
+  // High traffic, smooth flow, solution labels
+  // ─────────────────────────────────────────────────────────
+  else if(phase === 4){
+    const p = (elapsed-45000)/10000;
+    drawHexGrid(elapsed, lerp(0.32,0.58,p));
+    drawParticles(lerp(2.0,2.9,p), lerp(0.55,0.85,p));
+    drawStreams(elapsed, lerp(0.5,0.78,p));
+    drawOrbits(elapsed, 1);
+    drawPipeline(elapsed, 1);
+    drawReplicationNodes(elapsed, 1);
+    drawBackupLayer(elapsed, 1);
+    // Cache burst continuous
+    const ca=0.4+0.25*Math.sin(elapsed*0.008);
+    const cg=cx.createRadialGradient(hw*0.76,hh*0.52,10,hw*0.76,hh*0.52,85);
+    cg.addColorStop(0,CLR.saffA(ca*0.7));
+    cg.addColorStop(1,'transparent');
+    cx.save(); cx.fillStyle=cg; cx.globalAlpha=1;
+    cx.beginPath(); cx.arc(hw*0.76,hh*0.52,85,0,Math.PI*2); cx.fill();
+    cx.restore();
+    drawSolutionLabels(elapsed, E.out(clamp(p*2.8,0,1)));
+    drawStats(elapsed, 1);
+    drawScan(elapsed);
+    drawVignette(0.30);
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // PHASE 5 — FINAL IMPACT  [55s – 60s]
+  // Bright centered data core, clean UI, stable glow
+  // ─────────────────────────────────────────────────────────
+  else{
+    const p = (elapsed-55000)/5000;
+    drawHexGrid(elapsed, lerp(0.42,0.8,p));
+    drawParticles(lerp(2.8,3.5,p), lerp(0.8,1.0,p));
+    drawStreams(elapsed, lerp(0.72,0.96,p));
+    drawOrbits(elapsed, 1);
+    drawPipeline(elapsed, 1);
+    drawReplicationNodes(elapsed, 1);
+    drawBackupLayer(elapsed, 1);
+    drawSolutionLabels(elapsed, 1);
+    // Full radiance bloom
+    const glow=0.72+0.25*Math.sin(elapsed*0.003);
+    const fg=cx.createRadialGradient(hw/2,hh*0.52-4,10,hw/2,hh*0.52-4,240);
+    fg.addColorStop(0,CLR.goldA(glow*0.65));
+    fg.addColorStop(0.35,CLR.saffA(glow*0.22));
+    fg.addColorStop(1,'transparent');
+    cx.save();
+    cx.fillStyle=fg;
+    cx.globalAlpha=E.out(clamp(p*3,0,1));
+    cx.fillRect(0,0,hw,hh);
+    cx.restore();
+    drawStats(elapsed, 1);
+    drawScan(elapsed);
+    drawVignette(0.24);
+  }
+
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+
+document.getElementById('restart').addEventListener('click',()=>{
+  t0 = null;
+  currentPhase = -1;
+});
+</script>
+</body>
+</html>
