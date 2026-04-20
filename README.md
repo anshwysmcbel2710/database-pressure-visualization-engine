@@ -23,33 +23,33 @@ Source: fileciteturn0file0
 
 # 📑 Table of Contents
 
-* Project Overview
-* Objectives & Goals
-* Acceptance Criteria
-* Prerequisites
-* Installation & Setup
-* API Documentation
-* UI / Frontend
-* Status Codes
-* Features
-* Tech Stack & Architecture
-* Workflow & Implementation
-* Testing & Validation
-* Validation Summary
-* Verification Tools
-* Troubleshooting
-* Security
-* Deployment
-* Quick Start
-* Usage Notes
-* Performance
-* Enhancements
-* Maintenance
-* Milestones
-* Architecture
-* Folder Structure
-* Demo Guide
-* Summary
+1. 🧩 Project Overview
+2. 🎯 Objectives & Goals
+3. ✅ Acceptance Criteria
+4. 💻 Prerequisites
+5. ⚙️ Installation & Setup
+6. 🔗 API Documentation
+7. 🖥️ UI / Frontend
+8. 🔢 Status Codes
+9. 🚀 Features
+10. 🧱 Tech Stack & Architecture
+11. 🛠️ Workflow & Implementation
+12. 🧪 Testing & Validation
+13. 🔍 Validation Summary
+14. 🧰 Verification Tools
+15. 🧯 Troubleshooting
+16. 🔒 Security
+17. ☁️ Deployment
+18. ⚡ Quick Start
+19. 🧾 Usage Notes
+20. 🧠 Performance
+21. 🌟 Enhancements
+22. 🧩 Maintenance
+23. 🏆 Milestones
+24. 🧮 Architecture
+25. 🗂️ Folder Structure
+26. 🧭 Demo Guide
+27. 💡 Summary
 
 ---
 
